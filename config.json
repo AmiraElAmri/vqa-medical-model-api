@@ -1,0 +1,13 @@
+{
+  "model_name": "VQAModel",
+  "vision_model": "mobilenet_v2",
+  "nlp_model": "dmis-lab/biobert-base-cased-v1.1",
+  "num_labels": 501,
+  "image_size": [
+    224,
+    224
+  ],
+  "max_length": 128,
+  "label_map_path": "label_map.json",
+  "model_path": "saved_models/best_vqa_model.pth"
+}

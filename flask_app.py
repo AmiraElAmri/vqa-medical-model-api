@@ -1,0 +1,94 @@
+from flask import Flask, request, jsonify
+import torch
+import torchvision.transforms as T
+from PIL import Image
+from transformers import BertTokenizer
+import json
+import io
+
+app = Flask(__name__)
+
+# Charger label_map.json
+with open("label_map.json", "r") as f:
+    label_index = json.load(f)
+
+# Convertir les clés en entier uniquement si elles sont numériques
+label_index = {int(k): v for k, v in label_index.items() if k.isdigit()}
+num_labels = len(label_index)
+
+# Charger le modèle IA médical
+class VQAModel(torch.nn.Module):
+    def __init__(self, num_labels):
+        super(VQAModel, self).__init__()
+        # MobileNetV2 sans couche finale
+        self.mobilenet = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v2', pretrained=False)
+        self.mobilenet.classifier[1] = torch.nn.Identity()
+
+        # BioBERT sans mise à jour de poids
+        from transformers import BertModel
+        self.bert = BertModel.from_pretrained('dmis-lab/biobert-base-cased-v1.1')
+        self.bert.requires_grad_(False)
+
+        # MLP final
+        self.classifier = torch.nn.Sequential(
+            torch.nn.Linear(1280 + 768, 512),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.5),
+            torch.nn.Linear(512, num_labels)
+        )
+
+    def forward(self, image, tokens):
+        image_features = self.mobilenet(image)
+        text_features = self.bert(tokens['input_ids'], attention_mask=tokens['attention_mask']).pooler_output
+        combined = torch.cat((image_features, text_features), dim=1)
+        return self.classifier(combined)
+
+# Définir device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Charger le modèle entraîné
+model_path = "saved_models/best_vqa_model.pth"
+checkpoint = torch.load(model_path, map_location=device)
+model = VQAModel(num_labels=num_labels).to(device)
+model.load_state_dict(checkpoint["model_state_dict"])
+model.eval()
+
+# Charger le tokenizer BERT
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+# Transformations des images
+transform = T.Compose([
+    T.Resize((224, 224)),
+    T.ToTensor(),
+    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    if 'image' not in request.files or 'question' not in request.form:
+        return jsonify({"error": "Missing image or question"}), 400
+
+    image_file = request.files['image']
+    question = request.form['question']
+
+    try:
+        # Charger l'image
+        image = Image.open(io.BytesIO(image_file.read())).convert("RGB")
+        image_tensor = transform(image).unsqueeze(0).to(device).to(torch.float32)
+
+        # Encoder la question
+        tokens = tokenizer(question, padding='max_length', truncation=True, max_length=128, return_tensors="pt").to(device)
+
+        # Prédiction
+        with torch.no_grad():
+            output = model(image_tensor, tokens)
+            _, pred = torch.max(output, 1)
+
+        answer = label_index[pred.item()]
+        return jsonify({"answer": answer})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(debug=False)
